@@ -1,0 +1,66 @@
+library(INLA)
+library(Hmisc)
+library(dplyr)
+library(here)
+
+# Read data.csv files -----------------------------------------------------
+data <- read.csv(paste(here(),"/data.csv",sep=""))
+Ncounty <- dim(data)[1]
+Nstate <- 49
+
+# Rename variables in the dataset -----------------------------------------
+colnames(data) <- c("O","pop","mh19","mh10","mhChange","black","hispanic","male","age","uninsured","popdense","gini10","housing","vcrime","deprive","mobility","region1","region2","region4","ID.area","ID.area2","state","state2")
+
+# Read the graph file -----------------------------------------------------
+graph <- inla.read.graph(paste(here(),"/graph_mh.graph",sep=""))
+
+# Create the matrix for Leroux prior --------------------------------------
+Rs <- matrix(0, graph$n, graph$n)
+for(i in 1:graph$n){
+  Rs[i,i] <- graph$nnbs[[i]]
+  Rs[i,graph$nbs[[i]]] <- -1
+}
+R.Leroux <- diag(Ncounty) - Rs
+
+# Hyperprior distributions with "expression()" ----------------------------
+
+## Stanrd deviation: Uniform(0,Inf)
+sdunif="expression:
+logdens=-log_precision/2;
+return(logdens)"
+
+## Spatial correlation parameter:	Uniform(0,1)
+lunif = "expression:
+a = 1;
+b = 1;
+beta = exp(theta)/(1+exp(theta));
+logdens = lgamma(a+b)-lgamma(a)-lgamma(b)+(a-1)*beta+(b-1)*(1-beta);
+log_jacobian = log(beta*(1-beta));
+return(logdens+log_jacobian)"
+
+
+# INLA formula ------------------------------------------------------------
+##Basic formula: without mental health variables 
+inla.formula <- O ~ 1+black+hispanic+male+age+uninsured+popdense+deprive+gini10+housing+vcrime+mobility+region1+region2+region4 + f(ID.area, model="generic1", Cmatrix = R.Leroux, constr=T,hyper=list(prec=list(prior=sdunif),beta=list(prior=lunif, initial=0))) + f(state,model="iid",hyper = list(prec=list(prior="normal",param=c(0,0.001))))
+
+
+# Recover state-specific random coefficients ------------------------------
+lcs.slope.mh <- inla.make.lincombs(mh19=rep(1,Nstate),state2=diag(Nstate))
+lcs.slope.mhChange <- inla.make.lincombs(mhChange=rep(1,Nstate),state2=diag(Nstate))
+
+# INLA models -------------------------------------------------------------
+## Model with mentally unhealthy days
+model.mh19 <- inla(formula = update(inla.formula,.~.+mh19+mh10),family = "binomial",data = data,Ntrials=pop,control.compute = list(dic=T, waic=T,cpo=T))
+
+## Model with mental health change, 2010-19
+model.mh19 <- inla(formula = update(inla.formula,.~.+mhChange),family = "binomial",data = data,Ntrials=pop,control.compute = list(dic=T, waic=T,cpo=T))
+
+
+# INLA models: random coefficient -----------------------------------------
+## Model with mentally unhealthy days
+model.mh19.rs <- inla(formula = update(inla.formula,.~.+mh19+mh10+f(state2,mh19,model = "iid", hyper = list(prec = list(prior = "loggamma",param=c(0.01,0.01))))),family = "binomial",data = data,Ntrials = pop,control.compute = list(dic=T, waic=T,cpo=T),lincomb = lcs.slope.mh)
+
+## Model with mental health change, 2010-19
+model.mh19 <- inla(formula = update(inla.formula,.~.+mhChange+f(state2,mhChange,model = "iid", hyper = list(prec = list(prior = "loggamma",param=c(0.01,0.01))))),family = "binomial",data = inla.data,Ntrials = pop,control.compute = list(dic=T, waic=T,cpo=T),lincomb = lcs.slope.mhChange)
+
+
